@@ -1,0 +1,2 @@
+#### git packages
+git+https://github.com/lsst/rubin_scheduler.git#egg=rubin_scheduler
