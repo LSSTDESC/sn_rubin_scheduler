@@ -9,6 +9,7 @@ from rubin_scheduler.data import get_data_dir
 from rubin_scheduler.scheduler.utils import ScheduledObservationArray
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import SURVEY_START_MJD, calc_season, ddf_locations
+from sn_tools.sn_obs import season
 
 
 def ddf_slopes_deprecated(ddf_name, raw_obs, night_season, season_seq=30, min_season_length=0 / 365.25):
@@ -884,11 +885,6 @@ def generate_ddf_scheduled_obs(
             ddf_grid,
             **ddf_kwargs[ddf_name],
         )[0]
-        data = pd.DataFrame(mjds, columns=['mjd'])
-        data['mjd_int'] = data['mjd']
-        data['mjd_int'] = data['mjd_int'].astype(int)
-
-        print(data[['mjd', 'mjd_int']])
 
         for mjd in mjds:
             for bandname, nvis, nexp in zip(bands, nvis_master, nsnaps):
@@ -1093,7 +1089,8 @@ def generate_ddf_scheduled_obs_new(
     low_season_frac=0,
     low_season_rate=0.3,
     ddf_kwargs=None,
-    ddf_scenario=None
+    ddf_scenario=None,
+    include_moon_phase=False
 ):
     """
 
@@ -1248,23 +1245,55 @@ def generate_ddf_scheduled_obs_new(
             ddf_grid,
             **ddf_kwargs[ddf_name],
         )[0]
+
         data = pd.DataFrame(mjds, columns=['mjd'])
         data['mjd_int'] = data['mjd']
         data['mjd_int'] = data['mjd_int'].astype(int)
 
+        """
+        print(data[['mjd', 'mjd_int']])
+        obs = season(data.to_records(index=False), mjdCol='mjd')
+
+        seasons = np.unique(obs['season'])
+
+        for seas in seasons:
+            idx = obs['season'] == seas
+            sel = obs[idx]
+            seas_min = np.min(sel['mjd'])
+            seas_max = np.max(sel['mjd'])
+            seas_length = seas_max-seas_min
+            print(seas, seas_min, seas_max, seas_length)
+
+        """
         # select mjds in ddf_scenario
         idx = ddf_scenario['target'] == ddf_name
+        sel_target = ddf_scenario[idx]
 
+        """
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        ax.plot(obs['mjd'], obs['season'], 'ko')
+        ax.plot(sel_target['mjd'], sel_target['season'], 'r*')
+        plt.show()
+        """
         idx &= ddf_scenario['mjd'].isin(data['mjd_int'].to_list())
         sel_ddf = ddf_scenario[idx]
 
+        # set the season length to 180 days max
+        sel_ddf = sel_ddf.groupby(['target', 'season']).apply(
+            lambda x: reduce_season_length(x, sl_max=180.))
+
         for i, row in sel_ddf.iterrows():
             mjd = row['mjd']
+            if include_moon_phase:
+                bands = row['bands']
             nvis_master = row[list(bands)].to_list()
+
         # for mjd in mjds:
             for bandname, nvis, nexp in zip(bands, nvis_master, nsnaps):
                 if "EDFS" in ddf_name:
-                    obs = ScheduledObservationArray(n=int(nvis / 2))
+                    # obs = ScheduledObservationArray(n=int(nvis / 2))
+                    obs = ScheduledObservationArray(n=nvis)
                     obs["RA"] = np.radians(ddfs[ddf_name][0])
                     obs["dec"] = np.radians(ddfs[ddf_name][1])
                     obs["mjd"] = mjd
@@ -1285,7 +1314,7 @@ def generate_ddf_scheduled_obs_new(
                     obs["sun_alt_max"] = sun_alt_max
                     all_scheduled_obs.append(obs)
 
-                    obs = ScheduledObservationArray(n=int(nvis / 2))
+                    obs = ScheduledObservationArray(n=nvis)
                     obs["RA"] = np.radians(
                         ddfs[ddf_name.replace("_a", "_b")][0])
                     obs["dec"] = np.radians(
@@ -1339,3 +1368,40 @@ def generate_ddf_scheduled_obs_new(
 
     result = np.concatenate(all_scheduled_obs)
     return result
+
+
+def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
+    """
+    Function to reduce the number of observations acdcording to season length
+
+    Parameters
+    ----------
+    grp : pandas df
+        Data to process.
+    mjdCol : str, optional
+        col name to estimate season length. The default is 'mjd'.
+    sl_max : float, optional
+        max season length. The default is 180..
+
+    Returns
+    -------
+    res : pandas df
+        obs corresponding to the reduced season length.
+
+    """
+
+    grp = grp.sort_values(by=[mjdCol])
+    # get season length
+    mjd_min = grp[mjdCol].min()
+    mjd_max = grp[mjdCol].max()
+
+    season_length = mjd_max-mjd_min
+
+    if season_length < sl_max:
+        res = pd.DataFrame(grp)
+    else:
+        mjd_season = mjd_min+sl_max
+        idx = grp['mjd'] <= mjd_season
+        res = pd.DataFrame(grp[idx])
+
+    return res
