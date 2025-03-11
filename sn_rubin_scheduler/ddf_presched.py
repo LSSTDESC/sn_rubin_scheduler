@@ -9,7 +9,6 @@ from rubin_scheduler.data import get_data_dir
 from rubin_scheduler.scheduler.utils import ScheduledObservationArray
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import SURVEY_START_MJD, calc_season, ddf_locations
-from sn_tools.sn_obs import season
 
 
 def ddf_slopes_deprecated(ddf_name, raw_obs, night_season, season_seq=30, min_season_length=0 / 365.25):
@@ -1026,7 +1025,12 @@ def ddf_slopes(
     # Determine goal number of sequences in each season.
     if isinstance(season_seq, list):
         nseasons = len(season_list)
-        season_seq = season_seq[:nseasons]
+        nseas_diff = len(season_list)-len(season_seq)
+        if nseas_diff <= 0:
+            season_seq = season_seq[:nseasons]
+        else:
+            season_seq += [season_seq[-1]]*nseas_diff
+
     season_vals = np.ones(len(season_list), float) * season_seq
 
     # Adjust other seasons, relative to the max season length.
@@ -1374,13 +1378,324 @@ def generate_ddf_scheduled_obs_new(
     return result
 
 
-def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
+def generate_ddf_scheduled_obs_auto(
+    data_file=None,
+    flush_length=2,
+    mjd_tol=15,
+    expt=30.0,
+    alt_min=25,
+    alt_max=85,
+    HA_min=21.0,
+    HA_max=3.0,
+    sun_alt_max=-18,
+    moon_min_distance=25.0,
+    dist_tol=3.0,
+    nvis_master=[8, 10, 20, 20, 24, 18],
+    bands="ugrizy",
+    nsnaps=[1, 2, 2, 2, 2, 2],
+    mjd_start=SURVEY_START_MJD,
+    survey_length=10.0,
+    sequence_time=60.0,
+    season_unobs_frac=0.2,
+    low_season_frac=0,
+    low_season_rate=0.3,
+    ddf_kwargs=None,
+):
     """
-    Function to reduce the number of observations acdcording to season length
 
     Parameters
     ----------
-    grp : pandas df
+    data_file : `path` (None)
+        The data file to use for DDF airmass, m5, etc. Defaults to
+        using whatever is in rubin_sim_data/scheduler directory.
+    flush_length : `float` (2)
+        How long to keep a scheduled observation around before it is
+        considered failed and flushed (days).
+    mjd_tol : `float` (15)
+        How close an observation must be in time to be considered
+        matching a scheduled observation (minutes).
+    expt : `float` (30)
+        Total exposure time per visit (seconds).
+    alt_min/max : `float` (25, 85)
+        The minimum and maximum altitudes to permit observations to
+        happen (degrees).
+    HA_min/max : `float` (21, 3)
+        The hour angle limits to permit observations to happen (hours).
+    moon_min_distance : `float`
+        The minimum distance to demand from the moon (degrees).
+    dist_tol : `float` (3)
+        The distance tolerance for a visit to be considered matching a
+        scheduled observation (degrees).
+    nvis_master : list of ints ([8, 10, 20, 20, 24, 18])
+        The number of visits to make per band
+    bands : `str` (ugrizy)
+        The band names.
+    nsnaps : `list of ints` ([1, 2, 2, 2, 2, 2])
+        The number of snaps to use per band
+    mjd_start : `float`
+        Starting MJD of the survey. Default None, which calls
+        rubin_sim.utils.SURVEY_START_MJD
+    survey_length : `float`
+        Length of survey (years). Default 10.
+    sequence_time : `float`, optional
+        Expected time for each DDF sequence, used to avoid hitting the
+        sun_limit (running DDF visits into twilight). In minutes.
+    season_unobs_frac : `float`, optional
+        Defines the end of the range of the prescheduled observing season.
+        season runs from 0 (sun's apparent position is at the RA of the DDF)
+        to 1 (sun returns to an apparent position in the RA of the DDF).
+        The scheduled season runs from:
+        season_unobs_frac < season < (1-season_unobs_fract)
+    low_season_frac : `float`, optional
+        Defines the end of the range of the "low cadence" prescheduled
+        observing season.
+        The "standard cadence" season runs from:
+        low_season_frac < season < (1 - low_season_frac)
+        For an 'accordian' style DDF with fewer observations near
+        the ends of the season, set this to a value larger than
+        `season_unobs_frac`. Values smaller than `season_unobs_frac`
+        will result in DDFs with a constant rate throughout the season.
+    low_season_rate : `float`, optional
+        Defines the rate to use within the low cadence portion
+        of the season. During the standard season, the 'rate' is 1.
+        This is used in `ddf_slopes` to define the desired number of
+        cumulative observations for each DDF over time.
+    ddf_kwargs : `dict`
+        Dictionary to hold custom kwargs for each DDF. Default of None
+        will use internal defaults.
+    """
+    if data_file is None:
+        data_file = os.path.join(get_data_dir(), "scheduler", "ddf_grid.npz")
+
+    flush_length = flush_length  # days
+    mjd_tol = mjd_tol / 60 / 24.0  # minutes to days
+    expt = expt
+    alt_min = np.radians(alt_min)
+    alt_max = np.radians(alt_max)
+    dist_tol = np.radians(dist_tol)
+    sun_alt_max = np.radians(sun_alt_max)
+    moon_min_distance = np.radians(moon_min_distance)
+
+    ddfs = ddf_locations()
+    ddf_data = np.load(data_file)
+    ddf_grid = ddf_data["ddf_grid"].copy()
+
+    mjd_max = mjd_start + survey_length * 365.25
+
+    # check if our pre-computed grid is over the time range we think
+    # we are scheduling for
+    if (ddf_grid["mjd"].min() > mjd_start) | (ddf_grid["mjd"].max() < mjd_max):
+        warnings.warn(
+            "Pre-computed DDF properties don't match requested survey times")
+
+    in_range = np.where((ddf_grid["mjd"] >= mjd_start)
+                        & (ddf_grid["mjd"] <= mjd_max))
+    ddf_grid = ddf_grid[in_range]
+
+    if ddf_kwargs is None:
+        ddf_kwargs = {}
+        ddf_kwargs["ELAISS1"] = {
+            "season_seq": 30,
+            "boost_early_factor": None,
+            "boost_factor_third": 0,
+            "season_unobs_frac": season_unobs_frac,
+            "sequence_time": sequence_time,
+            "low_season_frac": low_season_frac,
+            "low_season_rate": low_season_rate,
+        }
+
+        ddf_kwargs["XMM_LSS"] = {
+            "season_seq": 30,
+            "boost_early_factor": None,
+            "boost_factor_third": 0,
+            "season_unobs_frac": season_unobs_frac,
+            "sequence_time": sequence_time,
+            "low_season_frac": low_season_frac,
+            "low_season_rate": low_season_rate,
+        }
+
+        ddf_kwargs["ECDFS"] = {
+            "season_seq": 30,
+            "boost_early_factor": None,
+            "boost_factor_third": 0,
+            "season_unobs_frac": season_unobs_frac,
+            "sequence_time": sequence_time,
+            "low_season_frac": low_season_frac,
+            "low_season_rate": low_season_rate,
+        }
+
+        ddf_kwargs["COSMOS"] = {
+            "season_seq": 30,
+            "boost_early_factor": 5.0,
+            "boost_factor_third": 2,
+            "season_unobs_frac": season_unobs_frac,
+            "sequence_time": sequence_time,
+            "low_season_frac": low_season_frac,
+            "low_season_rate": low_season_rate,
+        }
+
+        ddf_kwargs["EDFS_a"] = {
+            "season_seq": 30,
+            "boost_early_factor": None,
+            "boost_factor_third": 0,
+            "season_unobs_frac": season_unobs_frac,
+            "sequence_time": sequence_time,
+            "low_season_frac": low_season_frac,
+            "low_season_rate": low_season_rate,
+        }
+
+    all_scheduled_obs = []
+
+    # remove some dict values
+    ddf_kwargs_reduced = clean_dict(ddf_kwargs)
+
+    for ddf_name in ddf_kwargs:
+        print("Optimizing %s" % ddf_name)
+
+        mjds = optimize_ddf_times(
+            ddf_name,
+            ddfs[ddf_name][0],
+            ddf_grid,
+            **ddf_kwargs_reduced[ddf_name],
+        )[0]
+
+        # grab seasons - required to adapt the number of visits
+        data = np.rec.fromrecords(
+            list(map(lambda x: [x], mjds)), names=['mjd'])
+
+        data = season(data, mjdCol='mjd')
+
+        season_min = {}
+        for dd in data:
+            mjd = dd['mjd']
+            seas = dd['season']
+            if seas not in season_min.keys():
+                season_min[seas] = mjd
+            sl_length = mjd - season_min[seas]
+            if seas < 10:
+                sl_ref = ddf_kwargs[ddf_name]['season_length'][seas]
+            else:
+                sl_ref = ddf_kwargs[ddf_name]['season_length'][-1]
+            if sl_length >= sl_ref:
+                continue
+
+            nvis_master = []
+            for b in bands:
+                if seas <= 10:
+                    nvis_master.append(ddf_kwargs[ddf_name][b][seas-1])
+                else:
+                    nvis_master.append(ddf_kwargs[ddf_name][b][-1])
+
+            for bandname, nvis, nexp in zip(bands, nvis_master, nsnaps):
+                if "EDFS" in ddf_name:
+                    # obs = ScheduledObservationArray(n=int(nvis / 2))
+                    obs = ScheduledObservationArray(n=nvis)
+                    obs["RA"] = np.radians(ddfs[ddf_name][0])
+                    obs["dec"] = np.radians(ddfs[ddf_name][1])
+                    obs["mjd"] = mjd
+                    obs["flush_by_mjd"] = mjd + flush_length
+                    obs["exptime"] = expt
+                    obs["band"] = bandname
+                    obs["nexp"] = nexp
+                    obs["scheduler_note"] = "DD:%s" % ddf_name
+                    obs["target_name"] = "DD:%s" % ddf_name
+
+                    obs["mjd_tol"] = mjd_tol
+                    obs["dist_tol"] = dist_tol
+                    # Need to set something for HA limits
+                    obs["HA_min"] = HA_min
+                    obs["HA_max"] = HA_max
+                    obs["alt_min"] = alt_min
+                    obs["alt_max"] = alt_max
+                    obs["sun_alt_max"] = sun_alt_max
+                    all_scheduled_obs.append(obs)
+
+                    obs = ScheduledObservationArray(n=nvis)
+                    obs["RA"] = np.radians(
+                        ddfs[ddf_name.replace("_a", "_b")][0])
+                    obs["dec"] = np.radians(
+                        ddfs[ddf_name.replace("_a", "_b")][1])
+                    obs["mjd"] = mjd
+                    obs["flush_by_mjd"] = mjd + flush_length
+                    obs["exptime"] = expt
+                    obs["band"] = bandname
+                    obs["nexp"] = nexp
+                    obs["scheduler_note"] = "DD:%s" % ddf_name.replace(
+                        "_a", "_b")
+                    obs["target_name"] = "DD:%s" % ddf_name.replace("_a", "_b")
+                    obs["science_program"] = "DD"
+                    obs["observation_reason"] = "FBS"
+
+                    obs["mjd_tol"] = mjd_tol
+                    obs["dist_tol"] = dist_tol
+                    # Need to set something for HA limits
+                    obs["HA_min"] = HA_min
+                    obs["HA_max"] = HA_max
+                    obs["alt_min"] = alt_min
+                    obs["alt_max"] = alt_max
+                    obs["sun_alt_max"] = sun_alt_max
+                    obs["moon_min_distance"] = moon_min_distance
+                    all_scheduled_obs.append(obs)
+
+                else:
+                    obs = ScheduledObservationArray(n=nvis)
+                    obs["RA"] = np.radians(ddfs[ddf_name][0])
+                    obs["dec"] = np.radians(ddfs[ddf_name][1])
+                    obs["mjd"] = mjd
+                    obs["flush_by_mjd"] = mjd + flush_length
+                    obs["exptime"] = expt
+                    obs["band"] = bandname
+                    obs["nexp"] = nexp
+                    obs["scheduler_note"] = "DD:%s" % ddf_name
+                    obs["target_name"] = "DD:%s" % ddf_name
+                    obs["science_program"] = "DD"
+                    obs["observation_reason"] = "FBS"
+
+                    obs["mjd_tol"] = mjd_tol
+                    obs["dist_tol"] = dist_tol
+                    # Need to set something for HA limits
+                    obs["HA_min"] = HA_min
+                    obs["HA_max"] = HA_max
+                    obs["alt_min"] = alt_min
+                    obs["alt_max"] = alt_max
+                    obs["sun_alt_max"] = sun_alt_max
+                    obs["moon_min_distance"] = moon_min_distance
+                    all_scheduled_obs.append(obs)
+
+    result = np.concatenate(all_scheduled_obs)
+    return result
+
+
+def clean_dict(in_dict, lparams=list('ugrizy')+['season_length']):
+
+    import copy
+
+    out_dict = copy.deepcopy(in_dict)
+
+    for key, vals in out_dict.items():
+        for vv in lparams:
+            del vals[vv]
+
+    return out_dict
+
+
+def reduce_season(obs, cols=['mjd', 'season'], sl_max=200.):
+
+    df = pd.DataFrame.from_records(obs)
+
+    dfb = df.groupby([cols[1]]).apply(
+        lambda x: reduce_season_length(x, mjdCol=cols[0], sl_max=sl_max)).reset_index()
+
+    return dfb.to_records(index=False)
+
+
+def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
+    """
+    Function to reduce the number of observations according to season length
+
+    Parameters
+    ----------
+    obs : numpy array
         Data to process.
     mjdCol : str, optional
         col name to estimate season length. The default is 'mjd'.
@@ -1409,3 +1724,41 @@ def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
         res = pd.DataFrame(grp[idx])
 
     return res
+
+
+def season(obs, season_gap=50., mjdCol='observationStartMJD'):
+    """
+    Function to estimate seasons
+
+    Parameters
+    --------------
+    obs: numpy array
+      array of observations
+    season_gap: float, opt
+       minimal gap required to define a season (default: 80 days)
+    mjdCol: str, opt
+      col name for MJD infos (default: observationStartMJD)
+
+    Returns
+    ----------
+    original numpy array with season appended
+
+    """
+    import numpy.lib.recfunctions as rf
+
+    col = 'season'
+
+    obs.sort(order=mjdCol)
+
+    seasoncalc = np.ones(obs.size, dtype=int)
+
+    if len(obs) > 1:
+        diff = np.diff(obs[mjdCol])
+        flag = np.where(diff > season_gap)[0]
+
+        if len(flag) > 0:
+            for i, indx in enumerate(flag):
+                seasoncalc[indx+1:] = i+2
+
+    obs = rf.append_fields(obs, 'season', seasoncalc)
+    return obs
