@@ -1050,7 +1050,7 @@ def ddf_slopes(
             # Choose the minimum of - sequence every third night (?)
             # or the standard season sequence * boost_early_factor.
             season_vals[early_season] = np.min(
-                [max_n_seq_early, season_seq * boost_early_factor])
+                [max_n_seq_early, season_seq[int(early_season)] * boost_early_factor])
         first_full_two_seasons = np.where(
             (season_list == 0) | (season_list == 1))
         season_vals[first_full_two_seasons] *= boost_early_factor
@@ -1494,55 +1494,92 @@ def generate_ddf_scheduled_obs_auto(
     ddf_grid = ddf_grid[in_range]
 
     if ddf_kwargs is None:
+        nseas = 10
         ddf_kwargs = {}
         ddf_kwargs["ELAISS1"] = {
-            "season_seq": 30,
+            "season_seq": [30]*nseas,
             "boost_early_factor": None,
             "boost_factor_third": 0,
             "season_unobs_frac": season_unobs_frac,
             "sequence_time": sequence_time,
             "low_season_frac": low_season_frac,
             "low_season_rate": low_season_rate,
+            "u": [8]*nseas,
+            "g": [10]*nseas,
+            "r": [20]*nseas,
+            "i": [20]*nseas,
+            "z": [24]*nseas,
+            "y": [18]*nseas,
+            "season_length": [200.]*10
+
         }
 
         ddf_kwargs["XMM_LSS"] = {
-            "season_seq": 30,
+            "season_seq": [30]*nseas,
             "boost_early_factor": None,
             "boost_factor_third": 0,
             "season_unobs_frac": season_unobs_frac,
             "sequence_time": sequence_time,
             "low_season_frac": low_season_frac,
             "low_season_rate": low_season_rate,
+            "u": [8]*nseas,
+            "g": [10]*nseas,
+            "r": [20]*nseas,
+            "i": [20]*nseas,
+            "z": [24]*nseas,
+            "y": [18]*nseas,
+            "season_length": [200.]*nseas
         }
 
         ddf_kwargs["ECDFS"] = {
-            "season_seq": 30,
+            "season_seq": [30]*nseas,
             "boost_early_factor": None,
             "boost_factor_third": 0,
             "season_unobs_frac": season_unobs_frac,
             "sequence_time": sequence_time,
             "low_season_frac": low_season_frac,
             "low_season_rate": low_season_rate,
+            "u": [8]*nseas,
+            "g": [10]*nseas,
+            "r": [20]*nseas,
+            "i": [20]*nseas,
+            "z": [24]*nseas,
+            "y": [18]*nseas,
+            "season_length": [200.]*nseas
         }
 
         ddf_kwargs["COSMOS"] = {
-            "season_seq": 30,
+            "season_seq": [30]*nseas,
             "boost_early_factor": 5.0,
             "boost_factor_third": 2,
             "season_unobs_frac": season_unobs_frac,
             "sequence_time": sequence_time,
             "low_season_frac": low_season_frac,
             "low_season_rate": low_season_rate,
+            "u": [8]*nseas,
+            "g": [10]*nseas,
+            "r": [20]*nseas,
+            "i": [20]*nseas,
+            "z": [24]*nseas,
+            "y": [18]*nseas,
+            "season_length": [200.]*nseas
         }
 
         ddf_kwargs["EDFS_a"] = {
-            "season_seq": 30,
+            "season_seq": [30]*nseas,
             "boost_early_factor": None,
             "boost_factor_third": 0,
             "season_unobs_frac": season_unobs_frac,
             "sequence_time": sequence_time,
             "low_season_frac": low_season_frac,
             "low_season_rate": low_season_rate,
+            "u": [8]*nseas,
+            "g": [10]*nseas,
+            "r": [20]*nseas,
+            "i": [20]*nseas,
+            "z": [24]*nseas,
+            "y": [18]*nseas,
+            "season_length": [200.]*nseas
         }
 
     all_scheduled_obs = []
