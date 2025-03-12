@@ -1736,3 +1736,34 @@ def season(obs, season_gap=50., mjdCol='observationStartMJD'):
 
     obs = rf.append_fields(obs, 'season', seasoncalc)
     return obs
+
+
+def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
+    """
+    Function to reduce the number of observations according to season length
+    Parameters
+    ----------
+    grp : pandas df
+    obs : numpy array
+        Data to process.
+    mjdCol : str, optional
+        col name to estimate season length. The default is 'mjd'.
+
+    Returns
+    -------
+    res : pandas df
+        obs corresponding to the reduced season length.
+    """
+    grp = grp.sort_values(by=[mjdCol])
+    # get season length
+    mjd_min = grp[mjdCol].min()
+    mjd_max = grp[mjdCol].max()
+    season_length = mjd_max-mjd_min
+    if season_length < sl_max:
+        res = pd.DataFrame(grp)
+    else:
+        mjd_season = mjd_min+sl_max
+        idx = grp['mjd'] <= mjd_season
+        res = pd.DataFrame(grp[idx])
+
+    return res
