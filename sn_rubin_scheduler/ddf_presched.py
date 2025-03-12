@@ -9,6 +9,7 @@ from rubin_scheduler.data import get_data_dir
 from rubin_scheduler.scheduler.utils import ScheduledObservationArray
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import SURVEY_START_MJD, calc_season, ddf_locations
+import copy
 
 
 def ddf_slopes_deprecated(ddf_name, raw_obs, night_season, season_seq=30, min_season_length=0 / 365.25):
@@ -1546,17 +1547,17 @@ def generate_ddf_scheduled_obs_auto(
 
     all_scheduled_obs = []
 
-    # remove some dict values
-    ddf_kwargs_reduced = clean_dict(ddf_kwargs)
-
     for ddf_name in ddf_kwargs:
         print("Optimizing %s" % ddf_name)
+
+        thedict = clean_dict(ddf_kwargs[ddf_name])
 
         mjds = optimize_ddf_times(
             ddf_name,
             ddfs[ddf_name][0],
             ddf_grid,
-            **ddf_kwargs_reduced[ddf_name],
+            **thedict,
+            # **ddf_kwargs_reduced[ddf_name],
         )[0]
 
         # grab seasons - required to adapt the number of visits
@@ -1565,20 +1566,23 @@ def generate_ddf_scheduled_obs_auto(
 
         data = season(data, mjdCol='mjd')
 
-        season_min = {}
-        for dd in data:
-            mjd = dd['mjd']
-            seas = dd['season']
-            if seas not in season_min.keys():
-                season_min[seas] = mjd
-            sl_length = mjd - season_min[seas]
+        seasons = np.unique(data['season'])
+
+        for seas in seasons:
+            # select data in this season
+            data_seas = data[data['season'] == seas]
+
+            # season length cut
             if seas < 10:
                 sl_ref = ddf_kwargs[ddf_name]['season_length'][seas]
             else:
                 sl_ref = ddf_kwargs[ddf_name]['season_length'][-1]
-            if sl_length >= sl_ref:
-                continue
+            mjd_min = np.min(data_seas['mjd'])
 
+            idxb = data_seas['mjd']-mjd_min <= sl_ref
+            mjds = data_seas[idxb]['mjd']
+
+            # get nvisits per observing night
             nvis_master = []
             for b in bands:
                 if seas <= 10:
@@ -1586,144 +1590,114 @@ def generate_ddf_scheduled_obs_auto(
                 else:
                     nvis_master.append(ddf_kwargs[ddf_name][b][-1])
 
-            for bandname, nvis, nexp in zip(bands, nvis_master, nsnaps):
-                if "EDFS" in ddf_name:
-                    # obs = ScheduledObservationArray(n=int(nvis / 2))
-                    obs = ScheduledObservationArray(n=nvis)
-                    obs["RA"] = np.radians(ddfs[ddf_name][0])
-                    obs["dec"] = np.radians(ddfs[ddf_name][1])
-                    obs["mjd"] = mjd
-                    obs["flush_by_mjd"] = mjd + flush_length
-                    obs["exptime"] = expt
-                    obs["band"] = bandname
-                    obs["nexp"] = nexp
-                    obs["scheduler_note"] = "DD:%s" % ddf_name
-                    obs["target_name"] = "DD:%s" % ddf_name
+            for mjd in mjds:
+                for bandname, nvis, nexp in zip(bands, nvis_master, nsnaps):
+                    if "EDFS" in ddf_name:
+                        # obs = ScheduledObservationArray(n=int(nvis / 2))
+                        obs = ScheduledObservationArray(n=nvis)
+                        obs["RA"] = np.radians(ddfs[ddf_name][0])
+                        obs["dec"] = np.radians(ddfs[ddf_name][1])
+                        obs["mjd"] = mjd
+                        obs["flush_by_mjd"] = mjd + flush_length
+                        obs["exptime"] = expt
+                        obs["band"] = bandname
+                        obs["nexp"] = nexp
+                        obs["scheduler_note"] = "DD:%s" % ddf_name
+                        obs["target_name"] = "DD:%s" % ddf_name
 
-                    obs["mjd_tol"] = mjd_tol
-                    obs["dist_tol"] = dist_tol
-                    # Need to set something for HA limits
-                    obs["HA_min"] = HA_min
-                    obs["HA_max"] = HA_max
-                    obs["alt_min"] = alt_min
-                    obs["alt_max"] = alt_max
-                    obs["sun_alt_max"] = sun_alt_max
-                    all_scheduled_obs.append(obs)
+                        obs["mjd_tol"] = mjd_tol
+                        obs["dist_tol"] = dist_tol
+                        # Need to set something for HA limits
+                        obs["HA_min"] = HA_min
+                        obs["HA_max"] = HA_max
+                        obs["alt_min"] = alt_min
+                        obs["alt_max"] = alt_max
+                        obs["sun_alt_max"] = sun_alt_max
+                        all_scheduled_obs.append(obs)
 
-                    obs = ScheduledObservationArray(n=nvis)
-                    obs["RA"] = np.radians(
-                        ddfs[ddf_name.replace("_a", "_b")][0])
-                    obs["dec"] = np.radians(
-                        ddfs[ddf_name.replace("_a", "_b")][1])
-                    obs["mjd"] = mjd
-                    obs["flush_by_mjd"] = mjd + flush_length
-                    obs["exptime"] = expt
-                    obs["band"] = bandname
-                    obs["nexp"] = nexp
-                    obs["scheduler_note"] = "DD:%s" % ddf_name.replace(
-                        "_a", "_b")
-                    obs["target_name"] = "DD:%s" % ddf_name.replace("_a", "_b")
-                    obs["science_program"] = "DD"
-                    obs["observation_reason"] = "FBS"
+                        obs = ScheduledObservationArray(n=nvis)
+                        obs["RA"] = np.radians(
+                            ddfs[ddf_name.replace("_a", "_b")][0])
+                        obs["dec"] = np.radians(
+                            ddfs[ddf_name.replace("_a", "_b")][1])
+                        obs["mjd"] = mjd
+                        obs["flush_by_mjd"] = mjd + flush_length
+                        obs["exptime"] = expt
+                        obs["band"] = bandname
+                        obs["nexp"] = nexp
+                        obs["scheduler_note"] = "DD:%s" % ddf_name.replace(
+                            "_a", "_b")
+                        obs["target_name"] = "DD:%s" % ddf_name.replace(
+                            "_a", "_b")
+                        obs["science_program"] = "DD"
+                        obs["observation_reason"] = "FBS"
 
-                    obs["mjd_tol"] = mjd_tol
-                    obs["dist_tol"] = dist_tol
-                    # Need to set something for HA limits
-                    obs["HA_min"] = HA_min
-                    obs["HA_max"] = HA_max
-                    obs["alt_min"] = alt_min
-                    obs["alt_max"] = alt_max
-                    obs["sun_alt_max"] = sun_alt_max
-                    obs["moon_min_distance"] = moon_min_distance
-                    all_scheduled_obs.append(obs)
+                        obs["mjd_tol"] = mjd_tol
+                        obs["dist_tol"] = dist_tol
+                        # Need to set something for HA limits
+                        obs["HA_min"] = HA_min
+                        obs["HA_max"] = HA_max
+                        obs["alt_min"] = alt_min
+                        obs["alt_max"] = alt_max
+                        obs["sun_alt_max"] = sun_alt_max
+                        obs["moon_min_distance"] = moon_min_distance
+                        all_scheduled_obs.append(obs)
 
-                else:
-                    obs = ScheduledObservationArray(n=nvis)
-                    obs["RA"] = np.radians(ddfs[ddf_name][0])
-                    obs["dec"] = np.radians(ddfs[ddf_name][1])
-                    obs["mjd"] = mjd
-                    obs["flush_by_mjd"] = mjd + flush_length
-                    obs["exptime"] = expt
-                    obs["band"] = bandname
-                    obs["nexp"] = nexp
-                    obs["scheduler_note"] = "DD:%s" % ddf_name
-                    obs["target_name"] = "DD:%s" % ddf_name
-                    obs["science_program"] = "DD"
-                    obs["observation_reason"] = "FBS"
+                    else:
+                        obs = ScheduledObservationArray(n=nvis)
+                        obs["RA"] = np.radians(ddfs[ddf_name][0])
+                        obs["dec"] = np.radians(ddfs[ddf_name][1])
+                        obs["mjd"] = mjd
+                        obs["flush_by_mjd"] = mjd + flush_length
+                        obs["exptime"] = expt
+                        obs["band"] = bandname
+                        obs["nexp"] = nexp
+                        obs["scheduler_note"] = "DD:%s" % ddf_name
+                        obs["target_name"] = "DD:%s" % ddf_name
+                        obs["science_program"] = "DD"
+                        obs["observation_reason"] = "FBS"
 
-                    obs["mjd_tol"] = mjd_tol
-                    obs["dist_tol"] = dist_tol
-                    # Need to set something for HA limits
-                    obs["HA_min"] = HA_min
-                    obs["HA_max"] = HA_max
-                    obs["alt_min"] = alt_min
-                    obs["alt_max"] = alt_max
-                    obs["sun_alt_max"] = sun_alt_max
-                    obs["moon_min_distance"] = moon_min_distance
-                    all_scheduled_obs.append(obs)
+                        obs["mjd_tol"] = mjd_tol
+                        obs["dist_tol"] = dist_tol
+                        # Need to set something for HA limits
+                        obs["HA_min"] = HA_min
+                        obs["HA_max"] = HA_max
+                        obs["alt_min"] = alt_min
+                        obs["alt_max"] = alt_max
+                        obs["sun_alt_max"] = sun_alt_max
+                        obs["moon_min_distance"] = moon_min_distance
+                        all_scheduled_obs.append(obs)
 
     result = np.concatenate(all_scheduled_obs)
     return result
 
 
 def clean_dict(in_dict, lparams=list('ugrizy')+['season_length']):
+    """
+    Function to clean a dict
+
+    Parameters
+    ----------
+    in_dict : dict
+        input dict.
+    lparams : list(str), optional
+        List of keys to drop. The default is list('ugrizy')+['season_length'].
+
+    Returns
+    -------
+    out_dict : dict
+        output dict.
+
+    """
 
     import copy
 
     out_dict = copy.deepcopy(in_dict)
 
-    for key, vals in out_dict.items():
-        for vv in lparams:
-            del vals[vv]
+    for vv in lparams:
+        del out_dict[vv]
 
     return out_dict
-
-
-def reduce_season(obs, cols=['mjd', 'season'], sl_max=200.):
-
-    df = pd.DataFrame.from_records(obs)
-
-    dfb = df.groupby([cols[1]]).apply(
-        lambda x: reduce_season_length(x, mjdCol=cols[0], sl_max=sl_max)).reset_index()
-
-    return dfb.to_records(index=False)
-
-
-def reduce_season_length(grp, mjdCol='mjd', sl_max=200.):
-    """
-    Function to reduce the number of observations according to season length
-
-    Parameters
-    ----------
-    obs : numpy array
-        Data to process.
-    mjdCol : str, optional
-        col name to estimate season length. The default is 'mjd'.
-    sl_max : float, optional
-        max season length. The default is 180..
-
-    Returns
-    -------
-    res : pandas df
-        obs corresponding to the reduced season length.
-
-    """
-
-    grp = grp.sort_values(by=[mjdCol])
-    # get season length
-    mjd_min = grp[mjdCol].min()
-    mjd_max = grp[mjdCol].max()
-
-    season_length = mjd_max-mjd_min
-
-    if season_length < sl_max:
-        res = pd.DataFrame(grp)
-    else:
-        mjd_season = mjd_min+sl_max
-        idx = grp['mjd'] <= mjd_season
-        res = pd.DataFrame(grp[idx])
-
-    return res
 
 
 def season(obs, season_gap=50., mjdCol='observationStartMJD'):
